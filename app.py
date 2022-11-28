@@ -5,7 +5,50 @@ import pymysql.cursors
 import bcrypt
 import re
 from datetime import datetime
+import pandas as pd
+import numpy as np
+from os import listdir
+from os.path import isfile, join, isdir
+import glob
+import os
+from bs4 import BeautifulSoup
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+import random
+
+
 now = datetime.now()
+
+#Threshold setting
+threshold_1 = 3
+threshold_2 = 5
+
+# Preprocessed data
+frame = pd.read_csv("./data/problem.csv")
+content = pd.read_csv("./data/content.csv")
+frame = frame.merge(content, how="left", on="Title")
+
+# Model Training for Array
+frame_array = frame.loc[frame['Array']==1].reset_index(drop=True)
+column_trans = ColumnTransformer(
+                [('categories', OneHotEncoder(dtype='int'),
+                                 ['Difficulty']),
+                ('tfidf', TfidfVectorizer(), 'problem')],
+                remainder='drop', verbose_feature_names_out=False)
+frame_arr = frame_array[["Id","Title","Difficulty","problem"]]
+column_trans.fit(frame_arr)
+column_trans.get_feature_names_out()
+X = column_trans.transform(frame_arr).toarray()
+model_array = KMeans(n_clusters=3, init='k-means++', max_iter=200, n_init=10)
+model_array.fit(X)
+labels=model_array.labels_
+frame_array["cluster"] = labels 
+#print(frame_array)
+
+model_name = {"Array":model_array}
+df_name = {"Array":frame_array}
 
 connection = \
     pymysql.connect(host='database-1.czxn7uvkflod.us-west-2.rds.amazonaws.com'
@@ -16,7 +59,25 @@ cursor = connection.cursor()
 app = Flask(__name__)
 app.secret_key = 'yoursecretkey'
 
-@app.route('/')
+def recommend_problem(ds, uid, score):
+    while(True):
+        ds_df = df_name[ds]
+        flag = 0
+        if(score>=threshold_1 and score<threshold_2):
+            temp_df = ds_df[ds_df["cluster"]==1].reset_index(drop=True)
+        elif(score>=threshold_2):
+            temp_df = ds_df[ds_df["cluster"]==2].reset_index(drop=True)
+        else:
+            temp_df = ds_df[ds_df["cluster"]==0].reset_index(drop=True)
+        qid = random.choice(temp_df["Id"].tolist())
+        cursor.execute('Select * from questions_solved where userId = % s',(uid, ))
+        result = cursor.fetchall()
+        for r in result:
+            if(r["questionId"]==qid):
+                flag =1 
+        if(flag==0):
+            return temp_df[temp_df["Id"]==qid]["Content"].iloc[0]
+
 @app.route('/get_problems', methods=['GET', 'POST'])
 def get_problems():
     sql = 'Select * from Problems'
@@ -56,9 +117,9 @@ def login():
                 session["loggedin"] = True
                 session["id"] = account["id"]
                 session["username"] = account["username"]
-                msg = "Valid Login"
+                msg = {"message":"valid login", "uid": account["id"]}
             else:
-                msg = "Invalid Login"
+                msg = {"message": "Invalid Login"}
     return msg
 
 @app.route('/register', methods =['GET', 'POST'])
@@ -90,6 +151,29 @@ def register():
         elif request.method == 'POST':
             msg = 'Please fill out the form !'
         return msg
+
+@app.route('/')
+@app.route('/get_next_problem', methods=['GET', 'POST'])
+def get_next_problem():
+    request_data = request.get_json()
+    uid = request_data["userId"]
+    ds = request_data["dataStructure"]
+    cursor.execute("SELECT * FROM user_score WHERE userId = % s AND ds = % s",(uid, ds))
+    userScore = cursor.fetchone()
+    if(userScore):
+        user_score = userScore["score"]
+    else:
+        user_score = 0
+        cursor.execute('INSERT INTO user_score VALUES (% s, % s, % s)', (uid, ds, 0))
+        connection.commit()
+    content = recommend_problem(ds,uid, user_score)
+    return {"Content":content}
+
+@app.route('/get_data_structures', methods=['GET', 'POST'])
+def get_data_structure():
+    ds = ["Array", "Tree", "String", "Hash Table", "DFS"]
+    return ds
+    
 
 if __name__ == '__main__':
     app.run(debug=True)
